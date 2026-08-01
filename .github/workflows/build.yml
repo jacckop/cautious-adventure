@@ -1,0 +1,32 @@
+name: Build PiPSubtitles
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          brew install ldid xz
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          make clean
+          make FINALPACKAGE=1
+          mkdir output
+          find .theos -type f -name 'PiPSubtitles.dylib' -exec cp {} output/PiPSubtitles.dylib \;
+          test -f output/PiPSubtitles.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PiPSubtitles-arm64
+          path: output/PiPSubtitles.dylib
+          if-no-files-found: error
