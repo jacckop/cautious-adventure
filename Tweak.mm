@@ -22,11 +22,8 @@ NS_ASSUME_NONNULL_BEGIN
 NS_ASSUME_NONNULL_END
 
 
-#ifndef PIPSUB_TARGET_BUNDLE
-#define PIPSUB_TARGET_BUNDLE @"com.iCalculator.client.app"
-#endif
 
-static const NSTimeInterval kPIPPreparationTimeout = 1.75;
+static const NSTimeInterval kPIPPreparationTimeout = 4.0;
 static const NSTimeInterval kPIPFrameInterval = 1.0 / 30.0;
 static const NSTimeInterval kPIPSubtitlePollInterval = 0.10;
 static void *kPIPRenderQueueSpecificKey = &kPIPRenderQueueSpecificKey;
@@ -113,6 +110,34 @@ static NSArray<UIWindow *> *PIPApplicationWindows(void) {
     return windows;
 }
 
+static AVPlayerLayer * _Nullable PIPResolvePlayerLayerFromObject(id object) {
+    if (!object) {
+        return nil;
+    }
+
+    if ([object isKindOfClass:AVPlayerLayer.class]) {
+        AVPlayerLayer *layer = (AVPlayerLayer *)object;
+        return layer.player ? layer : nil;
+    }
+
+    id nestedLayer = PIPReadObjectIvar(object, "playerLayer");
+    if ([nestedLayer isKindOfClass:AVPlayerLayer.class]) {
+        AVPlayerLayer *layer = (AVPlayerLayer *)nestedLayer;
+        return layer.player ? layer : nil;
+    }
+
+    return nil;
+}
+
+static UILabel * _Nullable PIPResolveSubtitleLabelFromControlView(id controlView) {
+    if (!controlView) {
+        return nil;
+    }
+
+    id label = PIPReadObjectIvar(controlView, "subtitleLabel");
+    return [label isKindOfClass:UILabel.class] ? (UILabel *)label : nil;
+}
+
 static void PIPCollectPlayerContextInView(UIView *view,
                                           AVPlayerLayer *__strong _Nullable *playerLayer,
                                           UILabel *__strong _Nullable *subtitleLabel,
@@ -121,32 +146,51 @@ static void PIPCollectPlayerContextInView(UIView *view,
         return;
     }
 
-    if (PIPClassNameMatches(view,
-                            @"BMPlayer.BMPlayerControlView",
-                            "_TtC8BMPlayer19BMPlayerControlView")) {
-        id label = PIPReadObjectIvar(view, "subtitleLabel");
-        if ([label isKindOfClass:UILabel.class]) {
-            *subtitleLabel = (UILabel *)label;
-        }
-    }
-
-    if (PIPClassNameMatches(view,
-                            @"BMPlayer.BMPlayerLayerView",
-                            "_TtC8BMPlayer17BMPlayerLayerView")) {
-        id layer = PIPReadObjectIvar(view, "playerLayer");
-        if ([layer isKindOfClass:AVPlayerLayer.class] && ((AVPlayerLayer *)layer).player) {
-            *playerLayer = (AVPlayerLayer *)layer;
-            *hostParent = view;
-        }
-    }
-
+    // Resolve the exact BMPlayer instance first so the video layer and subtitle
+    // label always belong to the same player instead of two different views.
     if (PIPClassNameMatches(view,
                             @"BMPlayer.BMPlayer",
                             "_TtC8BMPlayer8BMPlayer")) {
-        id layer = PIPReadObjectIvar(view, "playerLayer");
-        if ([layer isKindOfClass:AVPlayerLayer.class] && ((AVPlayerLayer *)layer).player) {
-            *playerLayer = (AVPlayerLayer *)layer;
+        id layerView = PIPReadObjectIvar(view, "playerLayer");
+        AVPlayerLayer *resolvedLayer = PIPResolvePlayerLayerFromObject(layerView);
+        if (!resolvedLayer) {
+            resolvedLayer = PIPResolvePlayerLayerFromObject(view);
+        }
+
+        id controlView = PIPReadObjectIvar(view, "controlView");
+        UILabel *resolvedLabel = PIPResolveSubtitleLabelFromControlView(controlView);
+        if (!resolvedLabel) {
+            id customControlView = PIPReadObjectIvar(view, "customControlView");
+            resolvedLabel = PIPResolveSubtitleLabelFromControlView(customControlView);
+        }
+
+        if (resolvedLayer) {
+            *playerLayer = resolvedLayer;
             *hostParent = view;
+        }
+        if (resolvedLabel) {
+            *subtitleLabel = resolvedLabel;
+        }
+    }
+
+    if (!*subtitleLabel &&
+        PIPClassNameMatches(view,
+                            @"BMPlayer.BMPlayerControlView",
+                            "_TtC8BMPlayer19BMPlayerControlView")) {
+        UILabel *label = PIPResolveSubtitleLabelFromControlView(view);
+        if (label) {
+            *subtitleLabel = label;
+        }
+    }
+
+    if (!*playerLayer &&
+        PIPClassNameMatches(view,
+                            @"BMPlayer.BMPlayerLayerView",
+                            "_TtC8BMPlayer17BMPlayerLayerView")) {
+        AVPlayerLayer *layer = PIPResolvePlayerLayerFromObject(view);
+        if (layer) {
+            *playerLayer = layer;
+            *hostParent = view.superview ?: view;
         }
     }
 
@@ -172,6 +216,22 @@ static void PIPCollectPlayerContextInView(UIView *view,
             break;
         }
     }
+}
+
+static UILabel * _Nullable PIPFindVisibleSubtitleLabel(void) {
+    AVPlayerLayer *unusedLayer = nil;
+    UILabel *label = nil;
+    UIView *unusedHost = nil;
+    for (UIWindow *window in PIPApplicationWindows()) {
+        if (window.hidden || window.alpha <= 0.0) {
+            continue;
+        }
+        PIPCollectPlayerContextInView(window, &unusedLayer, &label, &unusedHost);
+        if (label) {
+            return label;
+        }
+    }
+    return nil;
 }
 
 #pragma mark - Manager
@@ -252,8 +312,7 @@ static void PIPCollectPlayerContextInView(UIView *view,
         return self.preparing || self.customActive;
     }
 
-    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:PIPSUB_TARGET_BUNDLE] ||
-        ![AVPictureInPictureController isPictureInPictureSupported]) {
+    if (![AVPictureInPictureController isPictureInPictureSupported]) {
         return NO;
     }
 
@@ -273,8 +332,10 @@ static void PIPCollectPlayerContextInView(UIView *view,
 
     AVPlayer *player = playerLayer.player;
     AVPlayerItem *item = player.currentItem;
-    if (!player || !item || !subtitleLabel || !hostParent ||
+    if (!player || !item || !hostParent ||
         item.status == AVPlayerItemStatusFailed || item.asset.hasProtectedContent) {
+        NSLog(@"[PiPSubtitles] Context unavailable player=%@ item=%@ host=%@ protected=%d",
+              player, item, hostParent, (int)item.asset.hasProtectedContent);
         return NO;
     }
 
@@ -292,6 +353,7 @@ static void PIPCollectPlayerContextInView(UIView *view,
     }
 
     if (![item.outputs containsObject:videoOutput]) {
+        NSLog(@"[PiPSubtitles] AVPlayerItem rejected AVPlayerItemVideoOutput");
         return NO;
     }
     [videoOutput requestNotificationOfMediaDataChangeWithAdvanceInterval:0.03];
@@ -310,10 +372,10 @@ static void PIPCollectPlayerContextInView(UIView *view,
     self.latestSubtitleText = @"";
     _lastPresentationTime = kCMTimeInvalid;
 
-    UIView *hostView = [[UIView alloc] initWithFrame:CGRectMake(-4.0, -4.0, 2.0, 2.0)];
+    UIView *hostView = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, 16.0, 9.0)];
     hostView.userInteractionEnabled = NO;
-    hostView.alpha = 0.01;
-    hostView.clipsToBounds = NO;
+    hostView.alpha = 0.02;
+    hostView.clipsToBounds = YES;
     hostView.backgroundColor = UIColor.clearColor;
     [hostParent addSubview:hostView];
     self.sampleLayerHostView = hostView;
@@ -336,6 +398,7 @@ static void PIPCollectPlayerContextInView(UIView *view,
         customController.delegate = self;
         customController.requiresLinearPlayback = NO;
         self.customController = customController;
+        [customController invalidatePlaybackState];
     } else {
         [self failPreparationAndUseFallback:YES];
         return YES;
@@ -390,6 +453,10 @@ static void PIPCollectPlayerContextInView(UIView *view,
         }
 
         UILabel *label = strongSelf.subtitleLabel;
+        if (!label || !label.window) {
+            label = PIPFindVisibleSubtitleLabel();
+            strongSelf.subtitleLabel = label;
+        }
         NSString *text = label.attributedText.string ?: label.text ?: @"";
         if (label.hidden || label.alpha <= 0.01) {
             text = @"";
@@ -444,13 +511,22 @@ static void PIPCollectPlayerContextInView(UIView *view,
     }
 
     CMTime itemTime = [output itemTimeForHostTime:CACurrentMediaTime()];
-    if (!CMTIME_IS_NUMERIC(itemTime)) {
+    if (!CMTIME_IS_NUMERIC(itemTime) || CMTIME_IS_INDEFINITE(itemTime)) {
         itemTime = player.currentTime;
     }
 
-    CVPixelBufferRef sourceBuffer = NULL;
-    if ([output hasNewPixelBufferForItemTime:itemTime]) {
-        sourceBuffer = [output copyPixelBufferForItemTime:itemTime itemTimeForDisplay:NULL];
+    CMTime displayTime = kCMTimeInvalid;
+    CVPixelBufferRef sourceBuffer =
+        [output copyPixelBufferForItemTime:itemTime itemTimeForDisplay:&displayTime];
+    if (!sourceBuffer) {
+        CMTime currentTime = player.currentTime;
+        sourceBuffer = [output copyPixelBufferForItemTime:currentTime
+                                           itemTimeForDisplay:&displayTime];
+        if (sourceBuffer) {
+            itemTime = CMTIME_IS_NUMERIC(displayTime) ? displayTime : currentTime;
+        }
+    } else if (CMTIME_IS_NUMERIC(displayTime)) {
+        itemTime = displayTime;
     }
 
     if (!sourceBuffer) {
@@ -897,9 +973,6 @@ static void PIPCollectPlayerContextInView(UIView *view,
 
 @end
 
-#ifndef PIPSUB_TARGET_BUNDLE
-#define PIPSUB_TARGET_BUNDLE @"com.iCalculator.client.app"
-#endif
 
 typedef void (*PIPVoidIMP)(id, SEL);
 typedef BOOL (*PIPBoolIMP)(id, SEL);
@@ -967,11 +1040,6 @@ static void PIPInstallMethodHook(Class cls, SEL selector, IMP replacement, IMP *
 __attribute__((constructor))
 static void PIPSubtitlesEntry(void) {
     @autoreleasepool {
-        NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
-        if (![bundleIdentifier isEqualToString:PIPSUB_TARGET_BUNDLE]) {
-            return;
-        }
-
         dispatch_async(dispatch_get_main_queue(), ^{
             Class pipClass = NSClassFromString(@"AVPictureInPictureController");
             if (!pipClass) {
