@@ -1,4 +1,4 @@
-name: Build PiPSubtitles
+name: Build PiPVideoCall dylib
 
 on:
   workflow_dispatch:
@@ -8,25 +8,57 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install Theos
+        shell: bash
         run: |
+          set -euo pipefail
           brew install ldid xz
           git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
 
-      - name: Build
+      - name: Build real Mach-O dylib
+        shell: bash
         run: |
+          set -euo pipefail
           make clean
-          make FINALPACKAGE=1
-          mkdir output
-          find .theos -type f -name 'PiPSubtitles.dylib' -exec cp {} output/PiPSubtitles.dylib \;
-          test -f output/PiPSubtitles.dylib
+          make FINALPACKAGE=1 DEBUG=0
 
-      - uses: actions/upload-artifact@v4
+          # Search only under the object directory and explicitly exclude dSYM/DWARF files.
+          REAL_DYLIB="$(find .theos/obj -type f -name 'PiPVideoCall.dylib' \
+            ! -path '*.dSYM/*' ! -path '*/DWARF/*' -print -quit)"
+
+          if [[ -z "${REAL_DYLIB}" || ! -f "${REAL_DYLIB}" ]]; then
+            echo 'The real PiPVideoCall.dylib was not found.' >&2
+            find .theos -maxdepth 8 -type f -print || true
+            exit 1
+          fi
+
+          echo "Selected build product: ${REAL_DYLIB}"
+          file "${REAL_DYLIB}"
+          otool -hv "${REAL_DYLIB}"
+
+          # A dSYM companion has file type MH_DSYM. Accept only an actual MH_DYLIB.
+          if ! otool -hv "${REAL_DYLIB}" | grep -qE '(^|[[:space:]])DYLIB([[:space:]]|$)'; then
+            echo 'Refusing to upload: selected file is not an MH_DYLIB.' >&2
+            exit 1
+          fi
+
+          mkdir -p output
+          cp -f "${REAL_DYLIB}" output/PiPVideoCall.dylib
+
+          # Verify the copied artifact again so a later command cannot replace it with a dSYM file.
+          file output/PiPVideoCall.dylib
+          otool -hv output/PiPVideoCall.dylib | grep -qE '(^|[[:space:]])DYLIB([[:space:]]|$)'
+          shasum -a 256 output/PiPVideoCall.dylib > output/SHA256.txt
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
         with:
-          name: PiPSubtitles-arm64
-          path: output/PiPSubtitles.dylib
+          name: PiPVideoCall-real-arm64
+          path: output/
           if-no-files-found: error
