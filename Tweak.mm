@@ -285,11 +285,15 @@ static void PIPCollectPlayerContextInView(UIView *view,
     AVPlayerItemVideoOutput *videoOutput =
         [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:pixelAttributes];
 
-    if (![item canAddOutput:videoOutput]) {
+    @try {
+        [item addOutput:videoOutput];
+    } @catch (__unused NSException *exception) {
         return NO;
     }
 
-    [item addOutput:videoOutput];
+    if (![item.outputs containsObject:videoOutput]) {
+        return NO;
+    }
     [videoOutput requestNotificationOfMediaDataChangeWithAdvanceInterval:0.03];
 
     self.originalController = controller;
@@ -378,28 +382,28 @@ static void PIPCollectPlayerContextInView(UIView *view,
                               (uint64_t)(kPIPSubtitlePollInterval * NSEC_PER_SEC),
                               (uint64_t)(0.02 * NSEC_PER_SEC));
 
-    __weak typeof(self) weakSelf = self;
+    __weak PIPSubtitleManager *weakSelf = self;
     dispatch_source_set_event_handler(timer, ^{
-        typeof(self) self = weakSelf;
-        if (!self || (!self.preparing && !self.customActive)) {
+        PIPSubtitleManager *strongSelf = weakSelf;
+        if (!strongSelf || (!strongSelf.preparing && !strongSelf.customActive)) {
             return;
         }
 
-        UILabel *label = self.subtitleLabel;
+        UILabel *label = strongSelf.subtitleLabel;
         NSString *text = label.attributedText.string ?: label.text ?: @"";
         if (label.hidden || label.alpha <= 0.01) {
             text = @"";
         }
         text = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
 
-        @synchronized (self) {
-            self.latestSubtitleText = text ?: @"";
+        @synchronized (strongSelf) {
+            strongSelf.latestSubtitleText = text ?: @"";
         }
 
         static NSUInteger playbackStateTick = 0;
         playbackStateTick++;
-        if (playbackStateTick % 5 == 0 && self.customController) {
-            [self.customController invalidatePlaybackState];
+        if (playbackStateTick % 5 == 0 && strongSelf.customController) {
+            [strongSelf.customController invalidatePlaybackState];
         }
     });
     dispatch_resume(timer);
@@ -416,14 +420,14 @@ static void PIPCollectPlayerContextInView(UIView *view,
                               (uint64_t)(kPIPFrameInterval * NSEC_PER_SEC),
                               (uint64_t)(0.004 * NSEC_PER_SEC));
 
-    __weak typeof(self) weakSelf = self;
+    __weak PIPSubtitleManager *weakSelf = self;
     dispatch_source_set_event_handler(timer, ^{
         @autoreleasepool {
-            typeof(self) self = weakSelf;
-            if (!self || (!self.preparing && !self.customActive)) {
+            PIPSubtitleManager *strongSelf = weakSelf;
+            if (!strongSelf || (!strongSelf.preparing && !strongSelf.customActive)) {
                 return;
             }
-            [self renderNextFrame];
+            [strongSelf renderNextFrame];
         }
     });
     dispatch_resume(timer);
